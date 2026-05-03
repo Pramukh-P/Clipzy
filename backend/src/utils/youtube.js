@@ -1,6 +1,14 @@
 const { execFile, spawn } = require('child_process');
 const { promisify } = require('util');
+const path = require('path');
+
 const execFileAsync = promisify(execFile);
+
+// ✅ Absolute path to yt-dlp binary (downloaded in render-build.sh)
+const YTDLP_PATH = path.join(process.cwd(), 'yt-dlp');
+
+// Optional debug (remove later if you want)
+// console.log("Using yt-dlp at:", YTDLP_PATH);
 
 function extractVideoId(url) {
   const patterns = [
@@ -14,6 +22,7 @@ function extractVideoId(url) {
   return null;
 }
 
+// ✅ Runs yt-dlp using local binary
 async function runYtDlpInfo(args) {
   const baseArgs = [
     '--no-warnings',
@@ -22,26 +31,31 @@ async function runYtDlpInfo(args) {
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     ...args,
   ];
-  const opts = { maxBuffer: 50 * 1024 * 1024, timeout: 45000 };
+
+  const opts = {
+    maxBuffer: 50 * 1024 * 1024,
+    timeout: 45000,
+  };
+
   try {
-    const { stdout } = await execFileAsync('yt-dlp', baseArgs, opts);
+    const { stdout } = await execFileAsync(YTDLP_PATH, baseArgs, opts);
     return stdout;
-  } catch (e1) {
-    try {
-      const { stdout } = await execFileAsync('python3', ['-m', 'yt_dlp', ...baseArgs], opts);
-      return stdout;
-    } catch (e2) {
-      throw new Error('yt-dlp is not installed. Run: pip install yt-dlp');
-    }
+  } catch (err) {
+    throw new Error(`yt-dlp failed: ${err.message}`);
   }
 }
 
 async function getVideoInfo(url) {
   const videoId = extractVideoId(url);
   if (!videoId) throw new Error('Invalid YouTube URL');
+
   const cleanUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
-  const stdout = await runYtDlpInfo(['--dump-single-json', '--skip-download', cleanUrl]);
+  const stdout = await runYtDlpInfo([
+    '--dump-single-json',
+    '--skip-download',
+    cleanUrl,
+  ]);
 
   let info;
   try {
@@ -54,15 +68,14 @@ async function getVideoInfo(url) {
 
   const rawFormats = info.formats || [];
 
-  // ── Quality label helper ──────────────────────────────────────────
+  // Quality label helper
   const qlabel = (f) => {
     if (f.height) return `${f.height}p`;
     if (f.format_note) return f.format_note;
     return 'auto';
   };
 
-  // ── COMBINED (video+audio in one stream — "progressive") ──────────
-  // yt-dlp marks these with both vcodec and acodec not "none"
+  // Combined (video+audio)
   const combinedMap = new Map();
   rawFormats
     .filter(f => f.vcodec !== 'none' && f.acodec !== 'none')
@@ -81,7 +94,7 @@ async function getVideoInfo(url) {
       }
     });
 
-  // ── VIDEO-ONLY adaptive formats ───────────────────────────────────
+  // Video-only
   const videoOnlyMap = new Map();
   rawFormats
     .filter(f => f.vcodec !== 'none' && f.acodec === 'none')
@@ -100,7 +113,7 @@ async function getVideoInfo(url) {
       }
     });
 
-  // ── AUDIO-ONLY formats ────────────────────────────────────────────
+  // Audio-only
   const audioOnlyMap = new Map();
   rawFormats
     .filter(f => f.vcodec === 'none' && f.acodec !== 'none')
@@ -120,7 +133,6 @@ async function getVideoInfo(url) {
       }
     });
 
-  // Sort by resolution descending
   const sortQ = arr =>
     [...arr].sort((a, b) => (parseInt(b.quality) || 0) - (parseInt(a.quality) || 0));
 
@@ -142,26 +154,34 @@ async function getVideoInfo(url) {
   };
 }
 
+// ✅ Spawn yt-dlp using local binary
 function spawnYtDlp(args) {
-  try {
-    return spawn('yt-dlp', args, { stdio: ['ignore', 'pipe', 'pipe'] });
-  } catch (_) {
-    return spawn('python3', ['-m', 'yt_dlp', ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
-  }
+  return spawn(YTDLP_PATH, args, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
 }
 
 function getDownloadStream(url, formatId) {
   const videoId = extractVideoId(url);
-  const cleanUrl = videoId ? `https://www.youtube.com/watch?v=${videoId}` : url;
+  const cleanUrl = videoId
+    ? `https://www.youtube.com/watch?v=${videoId}`
+    : url;
+
   const args = [
     '--no-warnings',
     '--no-check-certificates',
     '-f', String(formatId),
     '-o', '-',
-    '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    '--user-agent',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
     cleanUrl,
   ];
+
   return spawnYtDlp(args);
 }
 
-module.exports = { extractVideoId, getVideoInfo, getDownloadStream };
+module.exports = {
+  extractVideoId,
+  getVideoInfo,
+  getDownloadStream,
+};
