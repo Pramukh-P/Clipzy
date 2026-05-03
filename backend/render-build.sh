@@ -4,16 +4,18 @@ set -e
 echo "Installing Node dependencies..."
 npm install
 
-echo "Installing Python + yt-dlp..."
+echo "Installing yt-dlp binary..."
 
-# Ensure python + pip exist
-apt-get update
-apt-get install -y python3 python3-pip curl
+# Download yt-dlp binary
+curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o yt-dlp
 
-# Install yt-dlp
-pip3 install --no-cache-dir yt-dlp
+# Make executable
+chmod +x yt-dlp
 
-# Verify installation
-echo "yt-dlp version: $(yt-dlp --version || echo 'yt-dlp not found')"
+# Move to PATH
+mv yt-dlp /usr/local/bin/yt-dlp || mv yt-dlp /opt/render/project/src/yt-dlp
+
+# Verify
+echo "yt-dlp version: $(yt-dlp --version || echo 'not found')"
 
 echo "Build complete!"
