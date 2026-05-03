@@ -17,7 +17,7 @@ const Navbar = () => {
             </linearGradient>
           </defs>
         </svg> */}
-        <img src="./logo1.png" alt="" width={40}/>
+        <img src="./logo2.png" alt="" width={40}/>
         <span>Clipzy</span>
       </Link>
 
