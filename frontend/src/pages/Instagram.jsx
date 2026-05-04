@@ -1,7 +1,7 @@
 import React, { useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import toast from 'react-hot-toast';
-import { getInstagramInfo, getInstagramDownloadUrl } from '../utils/api';
+import { getInstagramInfo, getInstagramDownloadUrl, getInstagramProxyImageUrl } from '../utils/api';
 import { truncate } from '../utils/helpers';
 
 const TypeBadge = ({ type }) => {
@@ -47,7 +47,7 @@ const MediaItem = ({ item, index, selected, onToggle, onDownload, downloading })
         {isVideo ? (
           <div className="media-video-thumb">
             {item.thumbnail ? (
-              <img src={item.thumbnail} alt={`Item ${index + 1}`} />
+              <img src={getInstagramProxyImageUrl(item.thumbnail)} alt={`Item ${index + 1}`} />
             ) : (
               <div className="video-placeholder">
                 <span>▶</span>
@@ -57,11 +57,11 @@ const MediaItem = ({ item, index, selected, onToggle, onDownload, downloading })
           </div>
         ) : (
           <img
-            src={item.url || item.thumbnail}
+            src={getInstagramProxyImageUrl(item.url || item.thumbnail)}
             alt={`Item ${index + 1}`}
             className="media-img"
             onError={(e) => {
-              e.target.src = item.thumbnail || '';
+              e.target.src = item.thumbnail ? getInstagramProxyImageUrl(item.thumbnail) : '';
             }}
           />
         )}
@@ -161,7 +161,7 @@ const Instagram = () => {
     setDownloading(index);
     try {
       const filename = `clipzy-ig-${postData.shortcode}-${index + 1}`;
-      const dlUrl = getInstagramDownloadUrl(item.url, filename);
+      const dlUrl = getInstagramDownloadUrl(item.url, filename, item.needsYtDlp, item.ytDlpIndex);
       const a = document.createElement('a');
       a.href = dlUrl;
       a.download = filename;
@@ -187,7 +187,7 @@ const Instagram = () => {
     for (const item of items) {
       const idx = postData.mediaItems.indexOf(item);
       const filename = `clipzy-ig-${postData.shortcode}-${idx + 1}`;
-      const dlUrl = getInstagramDownloadUrl(item.url, filename);
+      const dlUrl = getInstagramDownloadUrl(item.url, filename, item.needsYtDlp, item.ytDlpIndex);
       const a = document.createElement('a');
       a.href = dlUrl;
       a.download = filename;

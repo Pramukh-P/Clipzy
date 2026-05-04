@@ -1,4 +1,4 @@
-const { extractVideoId, getVideoInfo, getDownloadStream } = require('../utils/youtube');
+const { extractVideoId, getVideoInfo, downloadToResponse } = require('../utils/youtube');
 
 async function getInfo(req, res) {
   try {
@@ -30,16 +30,24 @@ async function download(req, res) {
     const videoId = extractVideoId(url);
     if (!videoId) return res.status(400).json({ error: 'Invalid YouTube URL' });
 
-    // Determine correct extension and content-type
+    // Determine extension and content-type
     let ext = container || 'mp4';
     let contentType = 'video/mp4';
 
     if (type === 'audio-only') {
-      // yt-dlp audio formats can be m4a, webm, or opus
-      ext = ['m4a', 'webm', 'opus', 'ogg'].includes(container) ? container : 'webm';
+      ext = ['m4a', 'webm', 'opus', 'ogg'].includes(container) ? container : 'm4a';
       contentType = ext === 'm4a' ? 'audio/mp4' : 'audio/webm';
     } else if (ext === 'webm') {
       contentType = 'video/webm';
+    }
+
+    // needsMerge=true means adaptive streams that require ffmpeg to merge.
+    // These MUST be written to a temp file first — mp4 containers require
+    // random-access seeking that is impossible on a pipe/stdout.
+    const needsMerge = req.query.needsMerge === 'true';
+    if (needsMerge) {
+      ext = 'mp4';
+      contentType = 'video/mp4';
     }
 
     const safeTitle = (title || 'video')
@@ -49,31 +57,7 @@ async function download(req, res) {
 
     const filename = `${safeTitle}.${ext}`;
 
-    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
-    res.setHeader('Content-Type', contentType);
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Transfer-Encoding', 'chunked');
-
-    const proc = getDownloadStream(url, itag);
-
-    proc.stdout.pipe(res);
-
-    proc.stderr.on('data', (data) => {
-      const msg = data.toString().trim();
-      // Only log actual errors, not progress lines
-      if (msg && !msg.startsWith('[download]') && !msg.startsWith('[info]') && !msg.startsWith('[youtube]')) {
-        console.error('yt-dlp:', msg.slice(0, 150));
-      }
-    });
-
-    proc.on('error', (err) => {
-      console.error('yt-dlp spawn error:', err.message);
-      if (!res.headersSent) res.status(500).json({ error: 'Download failed.' });
-    });
-
-    req.on('close', () => {
-      try { proc.kill(); } catch (_) {}
-    });
+    await downloadToResponse(url, itag, needsMerge, res, filename, contentType);
   } catch (err) {
     console.error('YouTube download error:', err.message);
     if (!res.headersSent) res.status(500).json({ error: 'Download failed.' });

@@ -1,6 +1,22 @@
+/**
+ * YouTube utility using yt-dlp
+ *
+ * KEY INSIGHT about YouTube formats:
+ * - Up to ~360p: "progressive" streams that have BOTH video+audio in one file
+ * - 480p, 720p, 1080p, 1440p, 4K: "adaptive" streams — video-only + audio-only SEPARATE
+ *   These require ffmpeg to merge. We use yt-dlp's built-in merge via format selector.
+ *
+ * Strategy for "Video + Audio" tab:
+ *   We enumerate every unique height, then for each height we create a format entry
+ *   using yt-dlp's selector: "bestvideo[height=H][ext=mp4]+bestaudio[ext=m4a]/best[height=H]"
+ *   During download, yt-dlp merges via ffmpeg automatically.
+ */
+
 const { execFile, spawn } = require('child_process');
 const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
+
+// ── helpers ──────────────────────────────────────────────────────────────────
 
 function extractVideoId(url) {
   const patterns = [
@@ -14,98 +30,138 @@ function extractVideoId(url) {
   return null;
 }
 
-async function runYtDlpInfo(args) {
-  const baseArgs = [
+function ytdlpBin() { return 'yt-dlp'; }
+
+function ytdlpBaseArgs() {
+  return [
     '--no-warnings',
     '--no-check-certificates',
     '--user-agent',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    ...args,
   ];
+}
+
+async function runYtDlp(extraArgs) {
+  const args = [...ytdlpBaseArgs(), ...extraArgs];
   const opts = { maxBuffer: 50 * 1024 * 1024, timeout: 45000 };
   try {
-    const { stdout } = await execFileAsync('yt-dlp', baseArgs, opts);
+    const { stdout } = await execFileAsync(ytdlpBin(), args, opts);
     return stdout;
-  } catch (e1) {
-    try {
-      const { stdout } = await execFileAsync('python3', ['-m', 'yt_dlp', ...baseArgs], opts);
+  } catch (e) {
+    if (e.code === 'ENOENT') {
+      // fallback to python module
+      const { stdout } = await execFileAsync('python3', ['-m', 'yt_dlp', ...args], opts);
       return stdout;
-    } catch (e2) {
-      throw new Error('yt-dlp is not installed. Run: pip install yt-dlp');
     }
+    throw e;
   }
 }
+
+// ── getVideoInfo ──────────────────────────────────────────────────────────────
 
 async function getVideoInfo(url) {
   const videoId = extractVideoId(url);
   if (!videoId) throw new Error('Invalid YouTube URL');
   const cleanUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
-  const stdout = await runYtDlpInfo(['--dump-single-json', '--skip-download', cleanUrl]);
+  // Dump ALL formats as JSON
+  const stdout = await runYtDlp(['--dump-single-json', '--skip-download', cleanUrl]);
 
   let info;
   try {
     const jsonLine = stdout.split('\n').find(l => l.trim().startsWith('{'));
-    if (!jsonLine) throw new Error('No JSON output');
+    if (!jsonLine) throw new Error('empty');
     info = JSON.parse(jsonLine);
-  } catch (e) {
-    throw new Error('Failed to parse yt-dlp output');
+  } catch (_) {
+    throw new Error('Failed to parse yt-dlp output. Please try again.');
   }
 
   const rawFormats = info.formats || [];
 
-  // ── Quality label helper ──────────────────────────────────────────
-  const qlabel = (f) => {
-    if (f.height) return `${f.height}p`;
-    if (f.format_note) return f.format_note;
-    return 'auto';
-  };
+  // ── COMBINED (Video + Audio) ──────────────────────────────────────────────
+  // YouTube adaptive streams (480p+) are video-only. We collect ALL heights
+  // that appear in any video format, then for each height build a yt-dlp
+  // format selector that merges best video + best audio via ffmpeg.
+  // Progressive streams (≤360p, already have audio) are used directly.
 
-  // ── COMBINED (video+audio in one stream — "progressive") ──────────
-  // yt-dlp marks these with both vcodec and acodec not "none"
-  const combinedMap = new Map();
+  const allVideoHeights = new Set();
+  rawFormats.forEach(f => {
+    if (f.height && f.vcodec && f.vcodec !== 'none') {
+      allVideoHeights.add(f.height);
+    }
+  });
+
+  // Progressive (already combined) formats by height
+  const progressiveByHeight = new Map();
   rawFormats
-    .filter(f => f.vcodec !== 'none' && f.acodec !== 'none')
+    .filter(f => f.vcodec && f.vcodec !== 'none' && f.acodec && f.acodec !== 'none' && f.height)
     .forEach(f => {
-      const key = qlabel(f);
-      if (!combinedMap.has(key) || (f.filesize || 0) > (combinedMap.get(key).filesize || 0)) {
-        combinedMap.set(key, {
-          itag: f.format_id,
-          quality: key,
-          container: f.ext || 'mp4',
-          type: 'video+audio',
-          fps: f.fps || null,
-          filesize: f.filesize || f.filesize_approx || null,
-          url: f.url,
-        });
+      const h = f.height;
+      if (!progressiveByHeight.has(h) || (f.tbr || 0) > (progressiveByHeight.get(h).tbr || 0)) {
+        progressiveByHeight.set(h, f);
       }
     });
 
-  // ── VIDEO-ONLY adaptive formats ───────────────────────────────────
+  const combinedFormats = [];
+  const sortedHeights = [...allVideoHeights].sort((a, b) => b - a);
+
+  sortedHeights.forEach(h => {
+    const progressive = progressiveByHeight.get(h);
+    const bestVideoFmt = rawFormats
+      .filter(f => f.height === h && f.vcodec && f.vcodec !== 'none')
+      .sort((a, b) => (b.tbr || 0) - (a.tbr || 0))[0];
+
+    if (progressive) {
+      combinedFormats.push({
+        itag: progressive.format_id,
+        quality: `${h}p`,
+        container: progressive.ext || 'mp4',
+        type: 'video+audio',
+        needsMerge: false,
+        fps: progressive.fps || null,
+        filesize: progressive.filesize || progressive.filesize_approx || null,
+      });
+    } else {
+      // Adaptive: yt-dlp will merge video + audio via ffmpeg on download
+      const selector = `bestvideo[height=${h}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height=${h}]+bestaudio/best[height<=${h}]`;
+      combinedFormats.push({
+        itag: selector,
+        quality: `${h}p`,
+        container: 'mp4',
+        type: 'video+audio',
+        needsMerge: true,
+        fps: bestVideoFmt?.fps || null,
+        filesize: null,
+      });
+    }
+  });
+
+  // ── VIDEO ONLY: adaptive video streams ────────────────────────────────────
   const videoOnlyMap = new Map();
   rawFormats
-    .filter(f => f.vcodec !== 'none' && f.acodec === 'none')
+    .filter(f => f.vcodec !== 'none' && f.acodec === 'none' && f.height)
     .forEach(f => {
-      const key = `${qlabel(f)}-${f.fps || ''}`;
-      if (!videoOnlyMap.has(key)) {
+      const key = `${f.height}-${f.fps || 30}`;
+      if (!videoOnlyMap.has(key) || (f.tbr || 0) > (videoOnlyMap.get(key)._tbr || 0)) {
         videoOnlyMap.set(key, {
           itag: f.format_id,
-          quality: qlabel(f),
+          quality: `${f.height}p`,
           container: f.ext || 'mp4',
           type: 'video-only',
+          needsMerge: false,
           fps: f.fps || null,
           filesize: f.filesize || f.filesize_approx || null,
-          url: f.url,
+          _tbr: f.tbr || 0,
         });
       }
     });
 
-  // ── AUDIO-ONLY formats ────────────────────────────────────────────
+  // ── AUDIO ONLY ────────────────────────────────────────────────────────────
   const audioOnlyMap = new Map();
   rawFormats
     .filter(f => f.vcodec === 'none' && f.acodec !== 'none')
     .forEach(f => {
-      const kbps = f.abr ? Math.round(f.abr) : 0;
+      const kbps = Math.round(f.abr || 0);
       const key = `${kbps}-${f.ext}`;
       if (!audioOnlyMap.has(key)) {
         audioOnlyMap.set(key, {
@@ -113,16 +169,21 @@ async function getVideoInfo(url) {
           quality: kbps ? `${kbps}kbps` : (f.format_note || 'audio'),
           container: f.ext || 'm4a',
           type: 'audio-only',
+          needsMerge: false,
           audioBitrate: kbps || null,
           filesize: f.filesize || f.filesize_approx || null,
-          url: f.url,
         });
       }
     });
 
-  // Sort by resolution descending
-  const sortQ = arr =>
-    [...arr].sort((a, b) => (parseInt(b.quality) || 0) - (parseInt(a.quality) || 0));
+  const sortByQuality = arr => [...arr].sort((a, b) => {
+    const aH = parseInt(a.quality) || 0;
+    const bH = parseInt(b.quality) || 0;
+    return bH - aH;
+  });
+
+  // Clean up internal fields before returning
+  const cleanFormats = arr => arr.map(f => { const c = {...f}; delete c._tbr; return c; });
 
   return {
     videoId,
@@ -133,35 +194,119 @@ async function getVideoInfo(url) {
     thumbnail: info.thumbnail,
     description: (info.description || '').slice(0, 200),
     formats: {
-      combined: sortQ([...combinedMap.values()]),
-      videoOnly: sortQ([...videoOnlyMap.values()]),
-      audioOnly: [...audioOnlyMap.values()].sort(
+      combined: sortByQuality(cleanFormats(combinedFormats)),
+      videoOnly: sortByQuality(cleanFormats([...videoOnlyMap.values()])),
+      audioOnly: cleanFormats([...audioOnlyMap.values()]).sort(
         (a, b) => (b.audioBitrate || 0) - (a.audioBitrate || 0)
       ),
     },
   };
 }
 
-function spawnYtDlp(args) {
-  try {
-    return spawn('yt-dlp', args, { stdio: ['ignore', 'pipe', 'pipe'] });
-  } catch (_) {
-    return spawn('python3', ['-m', 'yt_dlp', ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
-  }
-}
+// ── getDownloadStream ─────────────────────────────────────────────────────────
 
-function getDownloadStream(url, formatId) {
+/**
+ * Download a YouTube video to a temp file, then stream it to the response.
+ *
+ * WHY TEMP FILE: MP4 container requires random-access seeking to write the
+ * moov atom (index). Piping directly to stdout produces audio-only or corrupt
+ * files. We write to /tmp, stream the result, then clean up.
+ *
+ * @param {string} url
+ * @param {string} formatIdOrSelector - format_id or yt-dlp format selector
+ * @param {boolean} needsMerge - true for adaptive (video+audio merge via ffmpeg)
+ * @param {object} res - Express response object
+ * @param {string} filename - filename for Content-Disposition
+ * @param {string} contentType
+ */
+async function downloadToResponse(url, formatIdOrSelector, needsMerge, res, filename, contentType) {
+  const { execFile } = require('child_process');
+  const fs = require('fs');
+  const path = require('path');
+  const os = require('os');
+
   const videoId = extractVideoId(url);
   const cleanUrl = videoId ? `https://www.youtube.com/watch?v=${videoId}` : url;
+
+  // Unique temp file path
+  const tmpFile = path.join(os.tmpdir(), `clipzy_yt_${Date.now()}_${Math.random().toString(36).slice(2)}.mp4`);
+
   const args = [
-    '--no-warnings',
-    '--no-check-certificates',
-    '-f', String(formatId),
-    '-o', '-',
-    '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    cleanUrl,
+    ...ytdlpBaseArgs(),
+    '-f', String(formatIdOrSelector),
+    '--no-playlist',
+    '-o', tmpFile,
   ];
-  return spawnYtDlp(args);
+
+  if (needsMerge) {
+    args.push('--merge-output-format', 'mp4');
+  }
+
+  args.push(cleanUrl);
+
+  return new Promise((resolve, reject) => {
+    const cleanup = () => { try { fs.unlinkSync(tmpFile); } catch (_) {} };
+
+    let ytdlp;
+    try {
+      ytdlp = require('child_process').spawn(ytdlpBin(), args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (_) {
+      ytdlp = require('child_process').spawn('python3', ['-m', 'yt_dlp', ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+    }
+
+    let stderrBuf = '';
+    ytdlp.stderr.on('data', d => {
+      const msg = d.toString();
+      if (!msg.startsWith('[download]') && !msg.startsWith('[info]') && !msg.startsWith('[youtube]')) {
+        stderrBuf += msg;
+      }
+    });
+
+    ytdlp.on('close', code => {
+      if (code !== 0) {
+        cleanup();
+        if (!res.headersSent) {
+          res.status(500).json({ error: 'yt-dlp failed. ' + stderrBuf.slice(0, 200) });
+        }
+        return resolve();
+      }
+
+      // yt-dlp may add .mp4 suffix automatically — check for it
+      let actualFile = tmpFile;
+      if (!fs.existsSync(tmpFile)) {
+        // Try common suffixes yt-dlp might append
+        const candidates = [tmpFile + '.mp4', tmpFile.replace('.mp4', '.webm'), tmpFile.replace('.mp4', '.mkv')];
+        actualFile = candidates.find(f => fs.existsSync(f)) || tmpFile;
+      }
+
+      if (!fs.existsSync(actualFile)) {
+        if (!res.headersSent) res.status(500).json({ error: 'Download file not found.' });
+        return resolve();
+      }
+
+      const stat = fs.statSync(actualFile);
+      res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
+      res.setHeader('Content-Type', contentType);
+      res.setHeader('Content-Length', stat.size);
+      res.setHeader('Cache-Control', 'no-cache');
+
+      const fileStream = fs.createReadStream(actualFile);
+      fileStream.pipe(res);
+      fileStream.on('end', () => { cleanup(); resolve(); });
+      fileStream.on('error', err => {
+        cleanup();
+        if (!res.headersSent) res.status(500).json({ error: 'Stream error.' });
+        resolve();
+      });
+      res.on('close', () => cleanup()); // client disconnected
+    });
+
+    ytdlp.on('error', err => {
+      cleanup();
+      if (!res.headersSent) res.status(500).json({ error: 'Failed to start yt-dlp.' });
+      resolve();
+    });
+  });
 }
 
-module.exports = { extractVideoId, getVideoInfo, getDownloadStream };
+module.exports = { extractVideoId, getVideoInfo, downloadToResponse };

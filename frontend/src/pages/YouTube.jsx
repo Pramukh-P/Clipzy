@@ -96,7 +96,7 @@ const YouTube = () => {
     if (downloading) return;
     setDownloading(format.itag);
     try {
-      const dlUrl = getYouTubeDownloadUrl(url.trim(), format.itag, videoData.title, format.type, format.container);
+      const dlUrl = getYouTubeDownloadUrl(url.trim(), format.itag, videoData.title, format.type, format.container, format.needsMerge);
       const a = document.createElement('a');
       a.href = dlUrl;
       a.download = '';

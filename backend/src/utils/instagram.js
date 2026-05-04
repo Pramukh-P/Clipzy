@@ -31,6 +31,7 @@ async function fetchViaYtDlp(url) {
     '--no-check-certificates',
     '--dump-single-json',
     '--skip-download',
+    '--yes-playlist',   // force carousel/playlist expansion
     url,
   ];
   const opts = { maxBuffer: 20 * 1024 * 1024, timeout: 30000 };
@@ -58,13 +59,39 @@ async function fetchViaYtDlp(url) {
   const shortcode = extractShortcode(url);
   const postType = detectPostType(url);
 
-  // yt-dlp returns either a single entry or a playlist (carousel)
-  const entries = info._type === 'playlist' ? (info.entries || []) : [info];
+  // yt-dlp carousel detection:
+  // - Carousel: _type === 'playlist' with entries[] array
+  // - Some builds return entries[] even without _type === 'playlist'
+  // - Single post: _type === 'video' or absent
+  let entries;
+  if (info._type === 'playlist' || (Array.isArray(info.entries) && info.entries.length > 0)) {
+    entries = info.entries || [];
+  } else {
+    entries = [info];
+  }
+  // Filter out null/placeholder entries yt-dlp sometimes inserts
+  entries = entries.filter(e => e && (e.url || e.formats));
 
   const mediaItems = entries.map((entry, index) => {
-    const isVideo = (entry.ext === 'mp4') || entry.vcodec !== 'none';
-    const mediaUrl = entry.url || (entry.formats && entry.formats.slice(-1)[0]?.url) || '';
-    const thumb = entry.thumbnail || '';
+    const isVideo = (entry.ext === 'mp4') || (entry.vcodec && entry.vcodec !== 'none');
+
+    // For images: use the direct CDN URL
+    // For videos: store the original post URL + item index so the download
+    //   endpoint can run yt-dlp with bestvideo+bestaudio --playlist-items N
+    let mediaUrl;
+    let needsYtDlp = false;
+    let ytDlpIndex = null; // 1-based index for yt-dlp --playlist-items
+
+    if (isVideo) {
+      mediaUrl = url; // original post URL
+      needsYtDlp = true;
+      ytDlpIndex = index + 1; // yt-dlp uses 1-based playlist index
+    } else {
+      mediaUrl = entry.url || (entry.formats && entry.formats.slice(-1)[0]?.url) || '';
+    }
+
+    // Thumbnail: prefer entry.thumbnail, then entry.url for images (it IS the image)
+    const thumb = entry.thumbnail || (isVideo ? '' : (entry.url || ''));
 
     return {
       index,
@@ -73,6 +100,8 @@ async function fetchViaYtDlp(url) {
       thumbnail: thumb,
       width: entry.width || 1080,
       height: entry.height || 1080,
+      needsYtDlp,
+      ytDlpIndex,
     };
   }).filter(m => m.url);
 

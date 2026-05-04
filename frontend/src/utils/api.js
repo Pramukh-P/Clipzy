@@ -41,8 +41,9 @@ export async function getYouTubeInfo(url) {
   return res.data.data;
 }
 
-export function getYouTubeDownloadUrl(url, itag, title, type, container) {
+export function getYouTubeDownloadUrl(url, itag, title, type, container, needsMerge) {
   const p = new URLSearchParams({ url, itag, title: title || 'video', type: type || 'video+audio', container: container || 'mp4' });
+  if (needsMerge) p.set('needsMerge', 'true');
   return `${BASE_URL}/api/youtube/download?${p.toString()}`;
 }
 
@@ -51,9 +52,17 @@ export async function getInstagramInfo(url) {
   return res.data.data;
 }
 
-export function getInstagramDownloadUrl(mediaUrl, filename) {
+export function getInstagramDownloadUrl(mediaUrl, filename, needsYtDlp, ytDlpIndex) {
   const p = new URLSearchParams({ mediaUrl, filename: filename || 'clipzy-instagram' });
+  if (needsYtDlp) p.set('needsYtDlp', 'true');
+  if (ytDlpIndex != null) p.set('ytDlpIndex', String(ytDlpIndex));
   return `${BASE_URL}/api/instagram/download?${p.toString()}`;
+}
+
+export function getInstagramProxyImageUrl(cdnUrl) {
+  if (!cdnUrl) return '';
+  const p = new URLSearchParams({ url: cdnUrl });
+  return `${BASE_URL}/api/instagram/proxy-image?${p.toString()}`;
 }
 
 export { BASE_URL };
