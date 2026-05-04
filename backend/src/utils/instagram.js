@@ -1,8 +1,16 @@
 const { execFile, spawn } = require('child_process');
 const { promisify } = require('util');
 const axios = require('axios');
+const path = require('path');
+const fs = require('fs');
 
 const execFileAsync = promisify(execFile);
+
+function ytdlpBin() {
+  const localBin = path.join(__dirname, '..', '..', 'bin', 'yt-dlp');
+  if (fs.existsSync(localBin)) return localBin;
+  return 'yt-dlp';
+}
 
 function extractShortcode(url) {
   const patterns = [
@@ -43,7 +51,7 @@ async function fetchViaYtDlp(url) {
 
   let stdout;
   try {
-    ({ stdout } = await execFileAsync('yt-dlp', baseArgs, opts));
+    ({ stdout } = await execFileAsync(ytdlpBin(), baseArgs, opts));
   } catch (_) {
     try {
       ({ stdout } = await execFileAsync('python3', ['-m', 'yt_dlp', ...baseArgs], opts));

@@ -1,6 +1,15 @@
 const { extractShortcode, fetchInstagramPost } = require('../utils/instagram');
 const axios = require('axios');
 const { spawn } = require('child_process');
+const path = require('path');
+const fs = require('fs');
+
+// On Render, /usr/local/bin is read-only — yt-dlp is installed to ./bin/yt-dlp
+function ytdlpBin() {
+  const localBin = path.join(__dirname, '..', '..', 'bin', 'yt-dlp');
+  if (fs.existsSync(localBin)) return localBin;
+  return 'yt-dlp';
+}
 
 /**
  * GET /api/instagram/info?url=...\n */
@@ -80,7 +89,7 @@ async function download(req, res) {
 
       try {
         try {
-          await runYtDlp('yt-dlp', ytdlpArgs);
+          await runYtDlp(ytdlpBin(), ytdlpArgs);
         } catch (_) {
           await runYtDlp('python3', ['-m', 'yt_dlp', ...ytdlpArgs]);
         }

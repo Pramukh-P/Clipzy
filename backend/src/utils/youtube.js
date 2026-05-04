@@ -30,7 +30,15 @@ function extractVideoId(url) {
   return null;
 }
 
-function ytdlpBin() { return 'yt-dlp'; }
+function ytdlpBin() {
+  // On Render, /usr/local/bin is read-only so we install to ./bin/yt-dlp
+  // Try local bin first, then fall back to system yt-dlp
+  const path = require('path');
+  const fs = require('fs');
+  const localBin = path.join(__dirname, '..', '..', 'bin', 'yt-dlp');
+  if (fs.existsSync(localBin)) return localBin;
+  return 'yt-dlp';
+}
 
 function ytdlpBaseArgs() {
   return [
