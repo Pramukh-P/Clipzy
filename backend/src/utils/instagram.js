@@ -26,15 +26,20 @@ function detectPostType(url) {
 
 // ── Method 1: yt-dlp (most reliable, handles IG natively) ────────────────────
 async function fetchViaYtDlp(url) {
+  // Strategy: use --dump-json (not --dump-single-json) with --yes-playlist.
+  // --dump-json outputs ONE JSON object per media item (one line per item),
+  // which correctly expands carousel posts into multiple entries.
+  // --dump-single-json wraps carousels in a playlist object whose entries[]
+  // are often lazy (_type: 'url') and don't have resolved media URLs.
   const baseArgs = [
     '--no-warnings',
     '--no-check-certificates',
-    '--dump-single-json',
+    '--dump-json',
     '--skip-download',
-    '--yes-playlist',   // force carousel/playlist expansion
+    '--yes-playlist',
     url,
   ];
-  const opts = { maxBuffer: 20 * 1024 * 1024, timeout: 30000 };
+  const opts = { maxBuffer: 20 * 1024 * 1024, timeout: 45000 };
 
   let stdout;
   try {
@@ -47,30 +52,20 @@ async function fetchViaYtDlp(url) {
     }
   }
 
-  let info;
-  try {
-    const jsonLine = stdout.split('\n').find(l => l.trim().startsWith('{'));
-    if (!jsonLine) return null;
-    info = JSON.parse(jsonLine);
-  } catch (_) {
-    return null;
-  }
+  // --dump-json outputs one JSON object per line (one per carousel item)
+  const entries = stdout
+    .split('\n')
+    .filter(l => l.trim().startsWith('{'))
+    .map(l => { try { return JSON.parse(l); } catch (_) { return null; } })
+    .filter(e => e && (e.url || e.formats));
+
+  if (entries.length === 0) return null;
 
   const shortcode = extractShortcode(url);
   const postType = detectPostType(url);
 
-  // yt-dlp carousel detection:
-  // - Carousel: _type === 'playlist' with entries[] array
-  // - Some builds return entries[] even without _type === 'playlist'
-  // - Single post: _type === 'video' or absent
-  let entries;
-  if (info._type === 'playlist' || (Array.isArray(info.entries) && info.entries.length > 0)) {
-    entries = info.entries || [];
-  } else {
-    entries = [info];
-  }
-  // Filter out null/placeholder entries yt-dlp sometimes inserts
-  entries = entries.filter(e => e && (e.url || e.formats));
+  // Use first entry for post-level metadata
+  const info = entries[0];
 
   const mediaItems = entries.map((entry, index) => {
     const isVideo = (entry.ext === 'mp4') || (entry.vcodec && entry.vcodec !== 'none');

@@ -36,13 +36,34 @@ function ytdlpBaseArgs() {
   return [
     '--no-warnings',
     '--no-check-certificates',
+    // Use tv_embedded client which doesn't require sign-in/PO tokens
+    // and works from server IPs that YouTube flags as bots
+    '--extractor-args', 'youtube:player_client=tv_embedded,web_creator',
     '--user-agent',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   ];
 }
 
-async function runYtDlp(extraArgs) {
-  const args = [...ytdlpBaseArgs(), ...extraArgs];
+// Fallback player clients to try if primary fails (bot detection workaround)
+const FALLBACK_CLIENTS = [
+  'tv_embedded,web_creator',
+  'tv_embedded',
+  'web_embedded',
+  'default',
+];
+
+async function runYtDlp(extraArgs, clientOverride) {
+  const baseArgs = clientOverride
+    ? [
+        '--no-warnings',
+        '--no-check-certificates',
+        '--extractor-args', `youtube:player_client=${clientOverride}`,
+        '--user-agent',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      ]
+    : ytdlpBaseArgs();
+
+  const args = [...baseArgs, ...extraArgs];
   const opts = { maxBuffer: 50 * 1024 * 1024, timeout: 45000 };
   try {
     const { stdout } = await execFileAsync(ytdlpBin(), args, opts);
@@ -64,8 +85,32 @@ async function getVideoInfo(url) {
   if (!videoId) throw new Error('Invalid YouTube URL');
   const cleanUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
-  // Dump ALL formats as JSON
-  const stdout = await runYtDlp(['--dump-single-json', '--skip-download', cleanUrl]);
+  // Try each player client in order until one works.
+  // YouTube increasingly blocks server IPs — tv_embedded and web_creator
+  // clients bypass the "Sign in to confirm you're not a bot" error.
+  const infoArgs = ['--dump-single-json', '--skip-download', cleanUrl];
+  let lastError;
+  let stdout;
+
+  for (const client of [null, ...FALLBACK_CLIENTS]) {
+    try {
+      stdout = await runYtDlp(infoArgs, client);
+      // If we got output, break out of the retry loop
+      if (stdout && stdout.trim()) break;
+    } catch (e) {
+      lastError = e;
+      const msg = (e.stderr || e.message || '').toLowerCase();
+      // Only retry on bot-detection errors
+      if (msg.includes('sign in') || msg.includes('bot') || msg.includes('player response')) {
+        continue;
+      }
+      throw e; // Non-bot error — don't retry
+    }
+  }
+
+  if (!stdout || !stdout.trim()) {
+    throw new Error(lastError?.message || 'Failed to fetch video info. Please try again.');
+  }
 
   let info;
   try {
@@ -240,6 +285,7 @@ async function downloadToResponse(url, formatIdOrSelector, needsMerge, res, file
 
   if (needsMerge) {
     args.push('--merge-output-format', 'mp4');
+    args.push('--ffmpeg-location', '/usr/bin/ffmpeg');
   }
 
   args.push(cleanUrl);
