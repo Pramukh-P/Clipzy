@@ -40,16 +40,45 @@ function ytdlpBin() {
   return 'yt-dlp';
 }
 
+/**
+ * Write YouTube cookies from env var to a temp file.
+ * YOUTUBE_COOKIES_B64 should be a base64-encoded Netscape cookie file.
+ * Get it by: base64 -w0 ~/cookies.txt
+ *
+ * To export cookies from Chrome: use "Get cookies.txt LOCALLY" extension,
+ * save as cookies.txt, then: base64 -w0 cookies.txt
+ * Set as Render env var: YOUTUBE_COOKIES_B64=<value>
+ */
+let _cookieFile = null;
+function getCookieFile() {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const b64 = process.env.YOUTUBE_COOKIES_B64;
+  if (!b64) return null;
+  if (_cookieFile && fs.existsSync(_cookieFile)) return _cookieFile;
+  try {
+    _cookieFile = path.join(os.tmpdir(), 'yt_cookies.txt');
+    fs.writeFileSync(_cookieFile, Buffer.from(b64, 'base64').toString('utf8'));
+    return _cookieFile;
+  } catch (_) {
+    return null;
+  }
+}
+
 function ytdlpBaseArgs() {
-  return [
+  const args = [
     '--no-warnings',
     '--no-check-certificates',
-    // Use tv_embedded client which doesn't require sign-in/PO tokens
-    // and works from server IPs that YouTube flags as bots
     '--extractor-args', 'youtube:player_client=tv_embedded,web_creator',
     '--user-agent',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   ];
+  const cookieFile = getCookieFile();
+  if (cookieFile) {
+    args.push('--cookies', cookieFile);
+  }
+  return args;
 }
 
 // Fallback player clients to try if primary fails (bot detection workaround)
