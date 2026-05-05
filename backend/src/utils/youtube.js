@@ -67,16 +67,20 @@ function getCookieFile() {
 }
 
 function ytdlpBaseArgs() {
+  const cookieFile = getCookieFile();
   const args = [
     '--no-warnings',
     '--no-check-certificates',
-    '--extractor-args', 'youtube:player_client=tv_embedded,web_creator',
     '--user-agent',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   ];
-  const cookieFile = getCookieFile();
+
   if (cookieFile) {
+    // Cookies present: use default client for full format list (no bot issue with cookies)
     args.push('--cookies', cookieFile);
+  } else {
+    // No cookies: use tv_embedded to bypass bot detection (limited formats but works)
+    args.push('--extractor-args', 'youtube:player_client=tv_embedded,web_creator');
   }
   return args;
 }
@@ -90,15 +94,20 @@ const FALLBACK_CLIENTS = [
 ];
 
 async function runYtDlp(extraArgs, clientOverride) {
-  const baseArgs = clientOverride
-    ? [
-        '--no-warnings',
-        '--no-check-certificates',
-        '--extractor-args', `youtube:player_client=${clientOverride}`,
-        '--user-agent',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      ]
-    : ytdlpBaseArgs();
+  let baseArgs;
+  if (clientOverride) {
+    const cookieFile = getCookieFile();
+    baseArgs = [
+      '--no-warnings',
+      '--no-check-certificates',
+      '--extractor-args', `youtube:player_client=${clientOverride}`,
+      '--user-agent',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    ];
+    if (cookieFile) baseArgs.push('--cookies', cookieFile);
+  } else {
+    baseArgs = ytdlpBaseArgs();
+  }
 
   const args = [...baseArgs, ...extraArgs];
   const opts = { maxBuffer: 50 * 1024 * 1024, timeout: 45000 };

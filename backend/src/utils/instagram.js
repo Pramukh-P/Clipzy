@@ -35,7 +35,8 @@ function detectPostType(url) {
 // Parse Instagram GraphQL media node (handles single + carousel)
 function parseGraphQLMedia(media, url, shortcode) {
   const postType = detectPostType(url);
-  const isCarousel = media.__typename === 'GraphSidecar' || !!media.carousel_media;
+  // media_type=8 is Instagram's carousel type in the ?__a=1 API response
+  const isCarousel = media.__typename === 'GraphSidecar' || !!media.carousel_media || media.media_type === 8;
   let mediaItems = [];
 
   if (isCarousel) {
@@ -108,7 +109,11 @@ async function fetchViaGraphQL(url, shortcode) {
     const data = res.data;
     const media = data?.items?.[0] || data?.graphql?.shortcode_media || data?.data?.xdt_shortcode_media;
     if (!media) return null;
-    return parseGraphQLMedia(media, url, shortcode);
+    const result = parseGraphQLMedia(media, url, shortcode);
+    // If we only got 1 item but media_type=8 (carousel), the carousel_media might
+    // be missing from this response — fall through to embed scrape
+    if (result && result.mediaItems.length === 1 && media.media_type === 8) return null;
+    return result;
   } catch (_) { return null; }
 }
 
@@ -147,13 +152,32 @@ async function fetchViaEmbedScrape(url, shortcode) {
     const seen = new Set();
 
     // Match all display_url entries (each carousel image appears once)
-    const displayUrlRe = /"display_url":"(https:\\\/\\\/[^"]+\.jpg[^"]*)"/g;
-    let m;
-    while ((m = displayUrlRe.exec(html)) !== null) {
-      const clean = m[1].replace(/\\u0026/g, '&').replace(/\\\//g, '/');
-      // Deduplicate by removing query string for comparison
+    // Try multiple regex patterns to catch all carousel images from embed HTML.
+    // Instagram encodes URLs differently depending on the embed page version.
+    const addUrl = (raw) => {
+      const clean = raw.replace(/[\\]/g, '/').replace(/\u0026/g, '&').replace(/&amp;/g, '&');
+      if (!clean.startsWith('https://')) return;
       const base = clean.split('?')[0];
       if (!seen.has(base)) { seen.add(base); imgUrls.push(clean); }
+    };
+
+    let m;
+    // Pattern 1: JSON with heavily escaped slashes
+    const p1Re = new RegExp('"display_url":"(https:\\\\/\\\\/[^"]+\\.jpg[^"]*)"', 'g');
+    while ((m = p1Re.exec(html)) !== null) addUrl(m[1]);
+
+    // Pattern 2: Plain JSON (no escaping)
+    const p2Re = /"display_url":"(https:[\/][^\/][^"]+\.jpg[^"]*)"/g;
+    while ((m = p2Re.exec(html)) !== null) addUrl(m[1]);
+
+    // Pattern 3: HTML entity encoded (newer embed pages)  
+    const p3Re = /display_url&quot;:&quot;(https[^&"<]+\.jpg[^&"<]*)/g;
+    while ((m = p3Re.exec(html)) !== null) addUrl(m[1].replace(/&amp;/g, '&'));
+
+    // Pattern 4: src attributes (last resort)
+    if (imgUrls.length === 0) {
+      const p4Re = /src="(https:\/\/(?:scontent|cdninstagram)[^"]+\.jpg[^"]*)"/g;
+      while ((m = p4Re.exec(html)) !== null) addUrl(m[1]);
     }
 
     const videoMatch = html.match(/video_url":"(https:\\\/\\\/[^"]+\.mp4[^"]*)/);
